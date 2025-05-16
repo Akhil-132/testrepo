@@ -119,7 +119,7 @@ jobs:
                 echo "✅ Database already initialized, skipping init."
               else
                 echo "⚠️ Odoo DB not initialized, running --init=base..."
-                sudo -u odoo /opt/odoo/odoo-venv/bin/python3 /opt/odoo/odoo16/odoo-bin -c /etc/odoo16.conf --init=base
+                sudo -u odoo /opt/odoo/odoo-venv/bin/python3 /opt/odoo/odoo16/odoo-bin -c /etc/odoo16.conf --init=base --stop-after-init
                 echo "✅ Database tables initialized."
                 sudo systemctl restart odoo16
                 echo "⏳ Giving Odoo 15 more seconds to boot..."
@@ -219,7 +219,7 @@ jobs:
                 echo "✅ Production database already initialized, skipping init."
               else
                 echo "⚠️ Production DB not initialized, running --init=base..."
-                sudo -u odoo /opt/odoo/odoo-venv/bin/python3 /opt/odoo/odoo16_prod/odoo-bin -c /etc/odoo16_prod.conf --init=base
+                sudo -u odoo /opt/odoo/odoo-venv/bin/python3 /opt/odoo/odoo16_prod/odoo-bin -c /etc/odoo16_prod.conf --init=base --stop-after-init
                 echo "✅ Production database tables initialized."
                 sudo systemctl restart odoo16_prod
                 echo "⏳ Giving Odoo 15 more seconds to boot..."
