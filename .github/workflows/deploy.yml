@@ -1,4 +1,5 @@
 name: Deploy Odoo 16
+
 on:
   push:
     branches:
@@ -165,7 +166,6 @@ jobs:
             fi
 
             echo "🚀 Deploying code to production..."
-
             if [ -f /etc/odoo16_prod.conf ] && [ -f /etc/systemd/system/odoo16_prod.service ]; then
               echo "ℹ️ Odoo service files exist. Updating production code..."
               sudo cp -R /opt/odoo/odoo16 /opt/odoo/odoo16_prod
@@ -210,11 +210,9 @@ jobs:
 
             echo "⏳ Waiting for Odoo production to start..."
             sleep 10
-
             echo "🔍 Checking if Odoo production is responding on http://localhost:8069"
             if ! curl -sSf http://localhost:8069/web > /dev/null; then
               echo "⚠️ Odoo production did not respond, checking database initialization..."
-
               if sudo -u postgres psql -d odoo_prod -tAc "SELECT to_regclass('public.ir_cron')" | grep -q 'ir_cron'; then
                 echo "✅ Production database already initialized, skipping init."
               else
@@ -227,6 +225,30 @@ jobs:
               fi
             else
               echo "✅ Odoo production is up and responding."
+            fi
+
+            if ! command -v nginx > /dev/null; then
+              echo "🔄 Installing Nginx..."
+              sudo apt update
+              sudo apt install -y nginx
+            fi
+
+            if [ ! -f /etc/nginx/sites-available/odoo ]; then
+              echo "📜 Creating Nginx config..."
+              echo "server {
+              listen 80;
+              server_name ${{ secrets.SERVER_IP_PROD }};
+              location / {
+                proxy_pass http://127.0.0.1:8069;
+                proxy_set_header Host \$host;
+                proxy_set_header X-Real-IP \$remote_addr;
+                proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto \$scheme;
+              }
+              }" | sudo tee /etc/nginx/sites-available/odoo
+              sudo ln -s /etc/nginx/sites-available/odoo /etc/nginx/sites-enabled/
+              sudo nginx -t
+              sudo systemctl restart nginx
             fi
 
             echo "✅ Odoo production setup complete!"
