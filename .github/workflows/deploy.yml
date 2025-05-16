@@ -1,5 +1,4 @@
 name: Deploy Odoo 16
-
 on:
   push:
     branches:
@@ -25,8 +24,8 @@ jobs:
             set -e
             echo "⚙️ Checking if Odoo configuration and systemd service exist for backup..."
             if [ -f /etc/odoo16.conf ] && [ -f /etc/systemd/system/odoo16.service ]; then
-              BACKUP_FILE="/tmp/odoo_dev_backup_$(date +%F_%H-%M-%S).sql.gz"
-              echo "🧠 Backing up PostgreSQL database 'odoo_dev'..."
+              BACKUP_FILE="/tmp/odoo_backup_$(date +%F_%H-%M-%S).sql.gz"
+              echo "🧠 Backing up PostgreSQL development database odoo_dev..."
               sudo -u postgres pg_dump odoo_dev | gzip > "$BACKUP_FILE"
               echo "✅ Backup saved to $BACKUP_FILE"
               sudo mv "$BACKUP_FILE" /opt/odoo/
@@ -43,7 +42,6 @@ jobs:
               git pull origin master --force || true
               sudo chown -R odoo:odoo /opt/odoo/odoo16
               sudo systemctl restart odoo16
-              echo "✅ Development deployment complete."
             else
               echo "⚙️ Setting up Odoo development for the first time..."
               sudo mkdir -p /opt/odoo
@@ -77,7 +75,6 @@ jobs:
                 pip install -r /opt/odoo/odoo16/requirements.txt
                 deactivate
               '
-
               echo "[options]
               admin_passwd = Password
               db_host = False
@@ -92,7 +89,7 @@ jobs:
               Description=Odoo16 Development
               Requires=postgresql.service
               After=network.target postgresql.service
-
+              
               [Service]
               Type=simple
               SyslogIdentifier=odoo16
@@ -109,6 +106,27 @@ jobs:
               sudo systemctl daemon-reload
               sudo systemctl enable odoo16
               sudo systemctl start odoo16
+            fi
+
+            echo "⏳ Waiting for Odoo to start..."
+            sleep 10
+
+            echo "🔍 Checking if Odoo is responding on http://localhost:8070"
+            if ! curl -sSf http://localhost:8070/web > /dev/null; then
+              echo "⚠️ Odoo did not respond, checking database initialization..."
+
+              if sudo -u postgres psql -d odoo_dev -tAc "SELECT to_regclass('public.ir_cron')" | grep -q 'ir_cron'; then
+                echo "✅ Database already initialized, skipping init."
+              else
+                echo "⚠️ Odoo DB not initialized, running --init=base..."
+                sudo -u odoo /opt/odoo/odoo-venv/bin/python3 /opt/odoo/odoo16/odoo-bin -c /etc/odoo16.conf --init=base
+                echo "✅ Database tables initialized."
+                sudo systemctl restart odoo16
+                echo "⏳ Giving Odoo 15 more seconds to boot..."
+                sleep 15
+              fi
+            else
+              echo "✅ Odoo is up and responding."
             fi
 
             echo "✅ Odoo development setup complete!"
@@ -129,14 +147,15 @@ jobs:
         run: |
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > key.pem
           chmod 600 key.pem
+
       - name: Deploy to Production Server
         run: |
           ssh -o StrictHostKeyChecking=no -i key.pem ubuntu@${{ secrets.SERVER_IP_PROD }} << 'EOF'
             set -e
             echo "⚙️ Checking if Odoo configuration and systemd service exist for backup..."
             if [ -f /etc/odoo16_prod.conf ] && [ -f /etc/systemd/system/odoo16_prod.service ]; then
-              BACKUP_FILE="/tmp/odoo_prod_backup_$(date +%F_%H-%M-%S).sql.gz"
-              echo "🧠 Backing up PostgreSQL database 'odoo_prod'..."
+              BACKUP_FILE="/tmp/odoo_backup_$(date +%F_%H-%M-%S).sql.gz"
+              echo "🧠 Backing up PostgreSQL production database odoo_prod..."
               sudo -u postgres pg_dump odoo_prod | gzip > "$BACKUP_FILE"
               echo "✅ Backup saved to $BACKUP_FILE"
               sudo mv "$BACKUP_FILE" /opt/odoo/
@@ -146,6 +165,7 @@ jobs:
             fi
 
             echo "🚀 Deploying code to production..."
+
             if [ -f /etc/odoo16_prod.conf ] && [ -f /etc/systemd/system/odoo16_prod.service ]; then
               echo "ℹ️ Odoo service files exist. Updating production code..."
               sudo cp -R /opt/odoo/odoo16 /opt/odoo/odoo16_prod
@@ -155,15 +175,21 @@ jobs:
               sudo cp -r /opt/odoo/odoo16 /opt/odoo/odoo16_prod
               sudo cp /etc/odoo16.conf /etc/odoo16_prod.conf
               sudo sed -i 's/xmlrpc_port = 8070/xmlrpc_port = 8069/' /etc/odoo16_prod.conf
-              sudo sed -i 's/db_name = odoo_dev/db_name = odoo_prod/' /etc/odoo16_prod.conf
-
-              sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='odoo_prod'" | grep -q 1 || \
-                sudo -u postgres createdb -O odoo odoo_prod
+              echo "[options]
+              admin_passwd = Password
+              db_host = False
+              db_port = False
+              db_user = odoo
+              db_password = False
+              db_name = odoo_prod
+              addons_path = /opt/odoo/odoo16_prod/addons
+              xmlrpc_port = 8069" | sudo tee /etc/odoo16_prod.conf > /dev/null
 
               echo "[Unit]
               Description=Odoo16 Production
               Requires=postgresql.service
               After=network.target postgresql.service
+              
               [Service]
               Type=simple
               SyslogIdentifier=odoo16_prod
@@ -173,37 +199,37 @@ jobs:
               ExecStart=/opt/odoo/odoo-venv/bin/python3 /opt/odoo/odoo16_prod/odoo-bin -c /etc/odoo16_prod.conf
               Restart=always
               StandardOutput=journal+console
+              
               [Install]
               WantedBy=multi-user.target" | sudo tee /etc/systemd/system/odoo16_prod.service > /dev/null
+
               sudo systemctl daemon-reload
               sudo systemctl enable odoo16_prod
-              sudo systemctl restart odoo16_prod
+              sudo systemctl start odoo16_prod
             fi
 
-            if ! command -v nginx > /dev/null; then
-              echo "🔄 Installing Nginx..."
-              sudo apt update
-              sudo apt install -y nginx
+            echo "⏳ Waiting for Odoo production to start..."
+            sleep 10
+
+            echo "🔍 Checking if Odoo production is responding on http://localhost:8069"
+            if ! curl -sSf http://localhost:8069/web > /dev/null; then
+              echo "⚠️ Odoo production did not respond, checking database initialization..."
+
+              if sudo -u postgres psql -d odoo_prod -tAc "SELECT to_regclass('public.ir_cron')" | grep -q 'ir_cron'; then
+                echo "✅ Production database already initialized, skipping init."
+              else
+                echo "⚠️ Production DB not initialized, running --init=base..."
+                sudo -u odoo /opt/odoo/odoo-venv/bin/python3 /opt/odoo/odoo16_prod/odoo-bin -c /etc/odoo16_prod.conf --init=base
+                echo "✅ Production database tables initialized."
+                sudo systemctl restart odoo16_prod
+                echo "⏳ Giving Odoo 15 more seconds to boot..."
+                sleep 15
+              fi
+            else
+              echo "✅ Odoo production is up and responding."
             fi
 
-            if [ ! -f /etc/nginx/sites-available/odoo ]; then
-              echo "📜 Creating Nginx config..."
-              echo "server {
-                listen 80;
-                server_name ${{ secrets.SERVER_IP_PROD }};
-                location / {
-                  proxy_pass http://127.0.0.1:8069;
-                  proxy_set_header Host \$host;
-                  proxy_set_header X-Real-IP \$remote_addr;
-                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto \$scheme;
-                }
-              }" | sudo tee /etc/nginx/sites-available/odoo
-              sudo ln -s /etc/nginx/sites-available/odoo /etc/nginx/sites-enabled/
-              sudo nginx -t
-              sudo systemctl restart nginx
-            fi
-            echo "✅ Odoo production deployment complete!"
+            echo "✅ Odoo production setup complete!"
           EOF
 
       - name: Clean up SSH Key
