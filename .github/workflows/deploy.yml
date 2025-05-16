@@ -1,44 +1,210 @@
-name: Deploy to EC2
+name: Deploy Odoo 16
 
 on:
   push:
     branches:
-      - master # Trigger deployment on pushes to the main branch
+      - master  # Auto deploy to development
+  workflow_dispatch:  # Manual trigger for production
 
 jobs:
-  deploy:
+  deploy-development:
+    if: github.event_name == 'push'  # Only run on push events
     runs-on: ubuntu-latest
-
     steps:
-      # Step 1: Checkout the code from the repository
-      - name: Checkout code
-        uses: actions/checkout@v2
+      - name: Checkout Repository
+        uses: actions/checkout@v3
 
-      # Step 2: Set up SSH for EC2 access
-      - name: Set up SSH key
+      - name: Set up SSH Key
         run: |
-          mkdir -p ~/.ssh
-          echo "$EC2_SSH_KEY" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          # Add EC2 host to known_hosts to avoid SSH prompts
-          ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > key.pem
+          chmod 600 key.pem
 
-      # Step 3: Install dependencies (e.g., Node.js, Python, etc.)
-      - name: Install dependencies
+      - name: Deploy to Development Server
         run: |
-          # Example for a Node.js app
-          sudo apt-get update
-          sudo apt-get install -y nodejs npm
+          ssh -o StrictHostKeyChecking=no -i key.pem ubuntu@${{ secrets.SERVER_IP }} << 'EOF'
+            set -e
+            echo "⚙️ Checking if Odoo configuration and systemd service exist for backup..."
+            if [ -f /etc/odoo16.conf ] && [ -f /etc/systemd/system/odoo16.service ]; then
+              BACKUP_FILE="/tmp/odoo_dev_backup_$(date +%F_%H-%M-%S).sql.gz"
+              echo "🧠 Backing up PostgreSQL database 'odoo_dev'..."
+              sudo -u postgres pg_dump odoo_dev | gzip > "$BACKUP_FILE"
+              echo "✅ Backup saved to $BACKUP_FILE"
+              sudo mv "$BACKUP_FILE" /opt/odoo/
+              sudo chown postgres:postgres /opt/odoo/$(basename $BACKUP_FILE)
+            else
+              echo "ℹ️ Odoo configuration or systemd service not found, skipping backup."
+            fi
 
-      # Step 4: Deploy to EC2 (for example, using rsync or SSH)
-      - name: Deploy to EC2
-        run: |
-          ssh -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST << 'EOF'
-            
-            # Pull the latest code (if using Git)
-            git pull origin main
+            if [ -f /etc/odoo16.conf ] && [ -f /etc/systemd/system/odoo16.service ]; then
+              echo "🚀 Updating existing Odoo development deployment..."
+              sudo chown -R ubuntu:ubuntu /opt/odoo/odoo16
+              cd /opt/odoo/odoo16
+              git config --global --add safe.directory /opt/odoo/odoo16
+              git pull origin master --force || true
+              sudo chown -R odoo:odoo /opt/odoo/odoo16
+              sudo systemctl restart odoo16
+              echo "✅ Development deployment complete."
+            else
+              echo "⚙️ Setting up Odoo development for the first time..."
+              sudo mkdir -p /opt/odoo
+              sudo useradd -m -d /opt/odoo -U -r -s /bin/bash odoo || true
+              sudo chown -R odoo:odoo /opt/odoo
+              sudo usermod -aG odoo ubuntu
+              sudo chmod -R 775 /opt/odoo
 
-            # Install dependencies (e.g., for Node.js or Python)
-            sudo apt install apache2
-           
+              sudo apt update && sudo apt install -y \
+                git python3-pip build-essential wget python3-dev python3-venv python3-wheel \
+                libfreetype6-dev libxml2-dev libzip-dev libldap2-dev libsasl2-dev python3-setuptools \
+                node-less libjpeg-dev zlib1g-dev libpq-dev libxslt1-dev libldb-dev libtirpc-dev postgresql
+
+              sudo systemctl enable postgresql
+              sudo systemctl start postgresql
+
+              sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='odoo'" | grep -q 1 || \
+                sudo -u postgres psql -c "CREATE ROLE odoo WITH SUPERUSER LOGIN;"
+
+              sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='odoo_dev'" | grep -q 1 || \
+                sudo -u postgres createdb -O odoo odoo_dev
+
+              echo "📦 Cloning private repository..."
+              GIT_SSH_COMMAND="ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no" git clone https://github.com/Akhil-132/odoo16.git /opt/odoo/odoo16
+
+              sudo -u odoo bash -c '
+                cd /opt/odoo/
+                python3 -m venv odoo-venv
+                source odoo-venv/bin/activate
+                pip install --upgrade pip wheel
+                pip install -r /opt/odoo/odoo16/requirements.txt
+                deactivate
+              '
+
+              echo "[options]
+              admin_passwd = Password
+              db_host = False
+              db_port = False
+              db_user = odoo
+              db_password = False
+              db_name = odoo_dev
+              addons_path = /opt/odoo/odoo16/addons
+              xmlrpc_port = 8070" | sudo tee /etc/odoo16.conf > /dev/null
+
+              echo "[Unit]
+              Description=Odoo16 Development
+              Requires=postgresql.service
+              After=network.target postgresql.service
+
+              [Service]
+              Type=simple
+              SyslogIdentifier=odoo16
+              PermissionsStartOnly=true
+              User=odoo
+              Group=odoo
+              ExecStart=/opt/odoo/odoo-venv/bin/python3 /opt/odoo/odoo16/odoo-bin -c /etc/odoo16.conf
+              Restart=always
+              StandardOutput=journal+console
+
+              [Install]
+              WantedBy=multi-user.target" | sudo tee /etc/systemd/system/odoo16.service > /dev/null
+
+              sudo systemctl daemon-reload
+              sudo systemctl enable odoo16
+              sudo systemctl start odoo16
+            fi
+
+            echo "✅ Odoo development setup complete!"
           EOF
+
+      - name: Clean up SSH Key
+        run: rm -f key.pem
+
+  deploy-production:
+    if: github.event_name == 'workflow_dispatch'  # Only run on manual trigger
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set up SSH Key
+        run: |
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > key.pem
+          chmod 600 key.pem
+      - name: Deploy to Production Server
+        run: |
+          ssh -o StrictHostKeyChecking=no -i key.pem ubuntu@${{ secrets.SERVER_IP_PROD }} << 'EOF'
+            set -e
+            echo "⚙️ Checking if Odoo configuration and systemd service exist for backup..."
+            if [ -f /etc/odoo16_prod.conf ] && [ -f /etc/systemd/system/odoo16_prod.service ]; then
+              BACKUP_FILE="/tmp/odoo_prod_backup_$(date +%F_%H-%M-%S).sql.gz"
+              echo "🧠 Backing up PostgreSQL database 'odoo_prod'..."
+              sudo -u postgres pg_dump odoo_prod | gzip > "$BACKUP_FILE"
+              echo "✅ Backup saved to $BACKUP_FILE"
+              sudo mv "$BACKUP_FILE" /opt/odoo/
+              sudo chown postgres:postgres /opt/odoo/$(basename $BACKUP_FILE)
+            else
+              echo "ℹ️ Odoo configuration or systemd service not found, skipping backup."
+            fi
+
+            echo "🚀 Deploying code to production..."
+            if [ -f /etc/odoo16_prod.conf ] && [ -f /etc/systemd/system/odoo16_prod.service ]; then
+              echo "ℹ️ Odoo service files exist. Updating production code..."
+              sudo cp -R /opt/odoo/odoo16 /opt/odoo/odoo16_prod
+              sudo systemctl restart odoo16_prod
+            else
+              echo "❓ Odoo service files not found. Setting up production environment..."
+              sudo cp -r /opt/odoo/odoo16 /opt/odoo/odoo16_prod
+              sudo cp /etc/odoo16.conf /etc/odoo16_prod.conf
+              sudo sed -i 's/xmlrpc_port = 8070/xmlrpc_port = 8069/' /etc/odoo16_prod.conf
+              sudo sed -i 's/db_name = odoo_dev/db_name = odoo_prod/' /etc/odoo16_prod.conf
+
+              sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='odoo_prod'" | grep -q 1 || \
+                sudo -u postgres createdb -O odoo odoo_prod
+
+              echo "[Unit]
+              Description=Odoo16 Production
+              Requires=postgresql.service
+              After=network.target postgresql.service
+              [Service]
+              Type=simple
+              SyslogIdentifier=odoo16_prod
+              PermissionsStartOnly=true
+              User=odoo
+              Group=odoo
+              ExecStart=/opt/odoo/odoo-venv/bin/python3 /opt/odoo/odoo16_prod/odoo-bin -c /etc/odoo16_prod.conf
+              Restart=always
+              StandardOutput=journal+console
+              [Install]
+              WantedBy=multi-user.target" | sudo tee /etc/systemd/system/odoo16_prod.service > /dev/null
+              sudo systemctl daemon-reload
+              sudo systemctl enable odoo16_prod
+              sudo systemctl restart odoo16_prod
+            fi
+
+            if ! command -v nginx > /dev/null; then
+              echo "🔄 Installing Nginx..."
+              sudo apt update
+              sudo apt install -y nginx
+            fi
+
+            if [ ! -f /etc/nginx/sites-available/odoo ]; then
+              echo "📜 Creating Nginx config..."
+              echo "server {
+                listen 80;
+                server_name ${{ secrets.SERVER_IP_PROD }};
+                location / {
+                  proxy_pass http://127.0.0.1:8069;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto \$scheme;
+                }
+              }" | sudo tee /etc/nginx/sites-available/odoo
+              sudo ln -s /etc/nginx/sites-available/odoo /etc/nginx/sites-enabled/
+              sudo nginx -t
+              sudo systemctl restart nginx
+            fi
+            echo "✅ Odoo production deployment complete!"
+          EOF
+
+      - name: Clean up SSH Key
+        run: rm -f key.pem
