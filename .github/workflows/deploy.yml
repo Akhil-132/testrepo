@@ -67,7 +67,7 @@ jobs:
                 sudo -u postgres createdb -O odoo odoo_dev
 
               echo "📦 Cloning private repository..."
-              GIT_SSH_COMMAND="ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no" git clone https://github.com/Akhil-132/odoo16.git /opt/odoo/odoo16
+              sudo git clone https://github.com/Akhil-132/odoo16.git /opt/odoo/odoo16
 
               sudo -u odoo bash -c '
                 cd /opt/odoo/
